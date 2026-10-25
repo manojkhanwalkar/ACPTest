@@ -16,7 +16,8 @@ public interface A2aAgent {
      * Handles one incoming message synchronously.
      *
      * @param message   the client's message
-     * @param contextId the A2A context the message belongs to (lets the agent keep per-conversation memory)
+     * @param contextId the conversation's memory key ({@link RequestContext#memoryKey()}: the caller plus the
+     *                  A2A {@code contextId}), to keep per-conversation memory
      * @return the text of the agent's reply
      */
     default String reply(A2a.Message message, String contextId) {
@@ -28,7 +29,7 @@ public interface A2aAgent {
      * server marks the task failed if this method throws or returns without settling the task.
      */
     default void execute(RequestContext request, TaskUpdater task) {
-        task.complete(reply(request.message(), request.contextId()));
+        task.complete(reply(request.message(), request.memoryKey()));
     }
 
     /** Agent-specific counters merged into the server's {@code GET /metrics} output. */

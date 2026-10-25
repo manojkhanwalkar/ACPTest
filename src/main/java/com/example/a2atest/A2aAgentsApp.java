@@ -25,7 +25,9 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Path;
+import java.security.SecureRandom;
 import java.time.Duration;
+import java.util.Base64;
 
 /**
  * Starts the six feature agents, each on its own A2A server (ports 10001-10006 by default), and drives each
@@ -36,7 +38,14 @@ public final class A2aAgentsApp {
 
     public static void main(String[] args) throws Exception {
         int basePort = args.length > 0 ? Integer.parseInt(args[0]) : 10001;
-        String apiKey = System.getenv().getOrDefault("A2A_API_KEY", "demo-key");
+        // no built-in default credential: use A2A_API_KEY, or a random key for this run only
+        String apiKey = System.getenv("A2A_API_KEY");
+        if (apiKey == null || apiKey.isBlank()) {
+            byte[] random = new byte[24];
+            new SecureRandom().nextBytes(random);
+            apiKey = Base64.getUrlEncoder().withoutPadding().encodeToString(random);
+            System.out.println("A2A_API_KEY not set; support-agent uses a random key for this run");
+        }
         LlmConfig llm = LlmConfig.fromEnv();
         System.out.println("LLM: " + llm.provider() + " (" + llm.modelName() + ")");
 

@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * Data model of the Agent2Agent protocol (A2A, https://a2a-protocol.org) over its JSON-RPC 2.0 binding.
@@ -391,6 +392,18 @@ public final class A2a {
         public static final int TASK_NOT_FOUND = -32001;
         public static final int TASK_NOT_CANCELABLE = -32002;
         public static final int UNSUPPORTED_OPERATION = -32004;
+        /** Implementation-defined (JSON-RPC reserves -32000 to -32099): too many tasks running. */
+        public static final int SERVER_BUSY = -32000;
+    }
+
+    private static final Pattern VALID_ID = Pattern.compile("[A-Za-z0-9._:-]{1,128}");
+
+    /**
+     * True for null or an id of 1-128 characters from {@code [A-Za-z0-9._:-]}. Client-chosen ids end up in
+     * memory keys, logs and file names, so the server refuses anything else.
+     */
+    public static boolean isValidId(String id) {
+        return id == null || VALID_ID.matcher(id).matches();
     }
 
     /** The last {@code n} elements of {@code list} (all of them when {@code n} is null or not smaller). */

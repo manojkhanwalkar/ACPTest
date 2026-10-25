@@ -190,9 +190,9 @@ reports.cancel(id);   // canceled
 | Concern | How |
 |---|---|
 | Authentication | The card declares `securitySchemes: {apiKey: {type: apiKey, in: header, name: X-API-Key}}`. `A2aServer` then requires a key from `Options.withApiKeys(...)` on every JSON-RPC call and on `/metrics`. A missing or wrong key gets **HTTP 401**. The agent card itself stays public. |
-| Input guardrails | `Guardrails.MaxLength` and `Guardrails.PromptInjection` (LangChain4j `InputGuardrail`). A blocked request makes the task **`rejected`**, and the LLM is never called. |
+| Input guardrails | `Guardrails.MaxLength` and `Guardrails.PromptInjection` (LangChain4j `InputGuardrail`). The injection check works on normalized text: Unicode NFKC, invisible characters removed, whitespace and punctuation collapsed. A blocked request makes the task **`rejected`** with a short reason, and the LLM is never called. `Guardrails.CardNumberRedaction` masks card numbers in the request, so they never reach the LLM provider or the stored memory. |
 | Output guardrail | `Guardrails.PiiRedaction` (`OutputGuardrail`) masks e-mail addresses and card numbers. |
-| Limits | `A2aServer.Options`: `withMaxRequestBytes` (larger requests get HTTP 413) and `withAgentTimeout`. A turn that runs over the timeout makes the task **`failed`** ("Timed out after …") and the agent thread is interrupted. The task store is bounded too (`maxTasks`). |
+| Limits | `A2aServer.Options`: `withMaxRequestBytes` (larger requests get HTTP 413), `withAgentTimeout` and `withMaxConcurrentTasks` (more running turns than that get HTTP 429, which caps LLM spend from non-blocking sends). A turn that runs over the timeout makes the task **`failed`** ("Timed out after …") and the agent thread is interrupted. The task store is bounded too (`maxTasks`). |
 | Memory limits | `ConversationMemory` keeps up to N messages per conversation, M conversations (least recently used are evicted first) and drops conversations after an idle timeout. With `FileChatMemoryStore` an evicted conversation stays on disk and **resumes** when its context is used again. |
 | Observability | `LlmMetrics` counts LLM calls, errors, tokens and latency. The server logs each task with its `taskId`/`contextId` (also put in the SLF4J MDC). `GET /metrics` returns request, task-state and agent counters as JSON. |
 
@@ -205,6 +205,11 @@ call is an A2A call to another agent. For "Where is order #42 and what is the re
 both tools in one step and combines the answers. The reply's data part lists every delegation
 (`{"delegations":[{"agent","question","answer"}]}`). If the order agent asks a clarifying question, the
 coordinator passes that question on in its answer.
+
+Every coordinator conversation gets its **own** conversation at the order and knowledge agents. The context id
+is derived from the coordinator's memory key, so one caller's questions never leak into another caller's
+answers. Answers from other agents are treated as untrusted: they are capped at 2,000 characters, and the
+system prompt tells the LLM never to follow instructions found in them.
 
 ## A2A protocol layer
 
@@ -225,6 +230,30 @@ task completes. A richer agent overrides `execute(RequestContext, TaskUpdater)` 
 Each call updates the task (visible through `tasks/get`) and is published to stream subscribers. Every turn
 runs on its own virtual thread.
 
+## Security model
+
+| Threat | Mitigation |
+|---|---|
+| A malicious agent card redirects the client (to steal the API key, or SSRF) | `A2aClient` only calls a card `url` on the same origin (scheme, host, port) it fetched the card from |
+| A hostile server floods the client | Responses and streams are read up to 16 MB |
+| One caller reads, continues or cancels another caller's task | Each task belongs to the principal that created it (`anonymous`, or an id derived from the API key). Other principals get "task not found". |
+| One caller reuses another caller's `contextId` to read or poison their chat memory | Agents key memory by `RequestContext.memoryKey()`, which combines principal and `contextId` |
+| Guessing or timing API keys | Keys are compared as SHA-256 digests in constant time, and every configured key is checked |
+| Misconfiguration | A server whose card requires an API key refuses to start without keys |
+| Cost or memory exhaustion | Request size limit, per-turn timeout, cap on concurrent tasks (HTTP 429), bounded task store and conversation memory; metrics count only known method names |
+| Internal details leaking in errors | Agent exceptions become "Internal error (reference …)" and the details are logged; parse errors don't echo the input; guardrail rejections don't name internal classes |
+| Hostile ids (`../`, very long) | `contextId` and `taskId` must be 1–128 characters of `[A-Za-z0-9._:-]` |
+| Sensitive data at rest | `FileChatMemoryStore` creates an owner-only directory (`rwx------`) and owner-only files (`rw-------`), and names files by the SHA-256 of the memory id. Card numbers are redacted before storage. |
+
+Known limits:
+- The servers bind to `localhost` and speak plain HTTP; put them behind TLS before exposing them.
+- With `anonymous` access, isolation relies on task and context ids being hard to guess. Let the server
+  generate them, or require API keys.
+- The order tools don't check which customer is asking. Any caller can look up any order.
+- The output guardrail redacts the reply, but the chat memory stores the LLM's original output. This is why
+  card numbers are redacted on input as well.
+- The prompt-injection check is a heuristic, not a complete defence.
+
 ## Choosing the LLM
 
 All feature agents get their model from `LlmConfig.fromEnv()`. By default they use deterministic
@@ -237,7 +266,7 @@ streaming code paths, so the build and the tests run offline.
 | `A2A_LLM_MODEL` | Model name. Default: `llama3.2` (ollama) or `claude-sonnet-5-5` (anthropic) |
 | `A2A_LLM_BASE_URL` | Ollama URL (default `http://localhost:11434`); optional for anthropic |
 | `ANTHROPIC_API_KEY` | Required for `anthropic` |
-| `A2A_API_KEY` | API key for `support-agent` in the demo (default `demo-key`) |
+| `A2A_API_KEY` | API key for `support-agent` in the demo. If unset, the demo generates a random key for the run; there is no built-in default credential. |
 
 ```bash
 A2A_LLM=anthropic ANTHROPIC_API_KEY=... ./mvnw compile exec:java -Dexec.mainClass=com.example.a2atest.A2aAgentsApp
@@ -280,7 +309,7 @@ I don't know; none of the policy documents cover that.
 === SupportAgent: API key, guardrails, memory, metrics ===
 Support (message 1 of this conversation): thanks, I have logged "My headphones stopped working, reach me at [email redacted]" ...
 Support (message 2 of this conversation): thanks, I have logged "They are from order 42" ...
-rejected: Request blocked by guardrail: ... Message looks like a prompt-injection attempt
+rejected: Request blocked: Message looks like a prompt-injection attempt
 wrong API key -> HTTP 401 from http://localhost:10005
 metrics -> {"agent":"support-agent","requests":{...},"tasks":{"completed":2,"rejected":1},"agentMetrics":{"llm":{"llmCalls":2,...}}}
 
@@ -304,3 +333,4 @@ them.
 | `agents/SupportAgentTest` | 401 without a key, input guardrails, PII redaction, memory, `/metrics`, eviction (in memory and persistent) |
 | `agents/CoordinatorAgentTest` | Fan-out to two agents, delegating only where needed, passing on a clarifying question |
 | `llm/LlmConfigTest` | Reading the environment config (no model is contacted) |
+| `SecurityTest` | One test per fix: card-url redirect, startup without keys, cross-caller task access, `contextId` reuse, coordinator isolation, id validation, 429, error hygiene, obfuscated injection, card data and file permissions at rest |

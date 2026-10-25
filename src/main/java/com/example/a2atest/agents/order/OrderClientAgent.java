@@ -36,12 +36,22 @@ public final class OrderClientAgent extends RemoteAgent {
         return ask(question, q -> null);
     }
 
+    /** Asks in the conversation {@code contextId}, without answering follow-up questions. */
+    public Answer ask(String question, String contextId) {
+        return ask(question, contextId, q -> null);
+    }
+
     /**
      * Asks a question; {@code answerer} gets each clarifying question of the agent and returns the reply, or
      * null to give up (the task is then canceled).
      */
     public Answer ask(String question, UnaryOperator<String> answerer) {
-        A2a.Task task = send(question);
+        return ask(question, contextId, answerer);
+    }
+
+    /** Like {@link #ask(String, UnaryOperator)}, in the conversation {@code contextId}. */
+    public Answer ask(String question, String contextId, UnaryOperator<String> answerer) {
+        A2a.Task task = send(question, contextId);
         List<String> questions = new ArrayList<>();
         while (task.status().state() == A2a.TaskState.INPUT_REQUIRED) {
             String agentQuestion = task.statusText();

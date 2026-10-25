@@ -33,6 +33,11 @@ public abstract class RemoteAgent {
     }
 
     protected A2a.Task send(String text) {
+        return send(text, contextId);
+    }
+
+    /** Sends in an explicit conversation, for clients that act for several callers (see the coordinator). */
+    protected A2a.Task send(String text, String contextId) {
         return a2a.sendMessage(card(), A2a.Message.user(text, contextId));
     }
 }

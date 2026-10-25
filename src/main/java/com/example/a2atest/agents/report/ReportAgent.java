@@ -78,11 +78,14 @@ public final class ReportAgent implements A2aAgent {
         AtomicInteger chunks = new AtomicInteger();
         CompletableFuture<Void> done = new CompletableFuture<>();
         writer.write(topic)
-                .onPartialResponse(token -> {
+                .onPartialResponseWithContext((partial, context) -> {
                     if (task.isCanceled()) {
-                        throw new IllegalStateException("Task canceled");
+                        // stop the model's stream too, so a canceled report doesn't keep using (paid) tokens
+                        context.streamingHandle().cancel();
+                        done.complete(null);
+                        return;
                     }
-                    task.artifactChunk(artifactId, ARTIFACT, token, false);
+                    task.artifactChunk(artifactId, ARTIFACT, partial.text(), false);
                     chunks.incrementAndGet();
                 })
                 .onCompleteResponse(response -> {
@@ -101,6 +104,9 @@ public final class ReportAgent implements A2aAgent {
                 return;
             }
             throw new IllegalStateException("Report generation failed: " + e.getCause().getMessage(), e.getCause());
+        }
+        if (task.isCanceled()) {
+            return;
         }
         task.complete("Report on \"" + topic + "\" is ready (" + chunks.get() + " chunks)");
     }

@@ -77,8 +77,8 @@ public final class KnowledgeAgent implements A2aAgent {
 
     @Override
     public void execute(RequestContext request, TaskUpdater task) {
-        memory.touch(request.contextId());
-        Result<String> result = assistant.answer(request.contextId(), request.message().text());
+        memory.touch(request.memoryKey());
+        Result<String> result = assistant.answer(request.memoryKey(), request.message().text());
         List<String> sources = result.sources().stream()
                 .map(Content::textSegment)
                 .map(segment -> segment.metadata().getString(KeywordContentRetriever.FILE_NAME))

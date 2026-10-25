@@ -30,14 +30,17 @@ final class TaskStore {
         };
     }
 
-    synchronized TaskRecord create(String contextId) {
-        TaskRecord task = new TaskRecord(UUID.randomUUID().toString(), contextId);
+    /** A new task owned by {@code owner}, the principal that may read, continue and cancel it. */
+    synchronized TaskRecord create(String contextId, String owner) {
+        TaskRecord task = new TaskRecord(UUID.randomUUID().toString(), contextId, owner);
         tasks.put(task.id(), task);
         return task;
     }
 
-    synchronized TaskRecord get(String id) {
-        return id == null ? null : tasks.get(id);
+    /** The task, or null if it doesn't exist or belongs to another principal (callers can't tell which). */
+    synchronized TaskRecord get(String id, String principal) {
+        TaskRecord task = id == null ? null : tasks.get(id);
+        return task != null && task.owner().equals(principal) ? task : null;
     }
 
     synchronized Map<String, Long> countByState() {
@@ -55,6 +58,7 @@ final class TaskStore {
 
         private final String id;
         private final String contextId;
+        private final String owner;
         private final List<A2a.Message> history = new ArrayList<>();
         private final Map<String, A2a.Artifact> artifacts = new LinkedHashMap<>();
         private final List<Consumer<A2a.StreamEvent>> listeners = new CopyOnWriteArrayList<>();
@@ -62,9 +66,10 @@ final class TaskStore {
         private CompletableFuture<Void> settled = new CompletableFuture<>();
         private Future<?> execution;
 
-        private TaskRecord(String id, String contextId) {
+        private TaskRecord(String id, String contextId, String owner) {
             this.id = id;
             this.contextId = contextId;
+            this.owner = owner;
         }
 
         String id() {
@@ -73,6 +78,10 @@ final class TaskStore {
 
         String contextId() {
             return contextId;
+        }
+
+        String owner() {
+            return owner;
         }
 
         synchronized A2a.TaskState state() {
@@ -92,11 +101,19 @@ final class TaskStore {
             this.execution = execution;
         }
 
-        /** Starts a turn with the client's message: back to {@code submitted}, with a fresh {@link #settled()}. */
-        synchronized void beginTurn(A2a.Message message) {
+        /**
+         * Starts a turn with the client's message: back to {@code submitted}, with a fresh {@link #settled()}.
+         * A continuation is accepted only while the task waits for input; checking and starting in one
+         * synchronized step means two concurrent continuations can't both be accepted.
+         */
+        synchronized boolean beginTurn(A2a.Message message, boolean continuation) {
+            if (continuation && !status.state().isInterrupted()) {
+                return false;
+            }
             history.add(message);
             status = new A2a.TaskStatus(A2a.TaskState.SUBMITTED, null, Instant.now());
             settled = new CompletableFuture<>();
+            return true;
         }
 
         /** Sets the status unless the task is already terminal; returns whether it changed. */

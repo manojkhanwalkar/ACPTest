@@ -29,7 +29,8 @@ import java.util.Map;
  *     <li><b>authentication</b>: its card declares an API-key security scheme, so the {@link A2aServer} answers
  *     JSON-RPC calls without a valid {@value A2a#API_KEY_HEADER} with HTTP 401</li>
  *     <li><b>guardrails</b>: LangChain4j input guardrails (message length, prompt injection) turn a request
- *     into a {@code rejected} task; an output guardrail redacts e-mail addresses and card numbers</li>
+ *     into a {@code rejected} task; card numbers in the request are masked before the LLM or memory sees them;
+ *     an output guardrail redacts e-mail addresses and card numbers</li>
  *     <li><b>limits</b>: request size and per-turn timeout come from the server's {@link A2aServer.Options}</li>
  *     <li><b>memory limits</b>: a {@link ConversationMemory} bounds messages per conversation and the number
  *     of conversations; with a persistent store an evicted conversation resumes from disk</li>
@@ -64,7 +65,8 @@ public final class SupportAgent implements A2aAgent {
         assistant = AiServices.builder(SupportAssistant.class)
                 .chatModel(llm.chatModel(placeholderModel(), List.of(metrics)))
                 .chatMemoryProvider(memory)
-                .inputGuardrails(new Guardrails.MaxLength(MAX_MESSAGE_CHARS), new Guardrails.PromptInjection())
+                .inputGuardrails(new Guardrails.MaxLength(MAX_MESSAGE_CHARS), new Guardrails.PromptInjection(),
+                        new Guardrails.CardNumberRedaction())
                 .outputGuardrails(new Guardrails.PiiRedaction())
                 .build();
         memory.bind(assistant);
@@ -81,11 +83,11 @@ public final class SupportAgent implements A2aAgent {
 
     @Override
     public void execute(RequestContext request, TaskUpdater task) {
-        memory.touch(request.contextId());
+        memory.touch(request.memoryKey());
         try {
-            task.complete(assistant.chat(request.contextId(), request.message().text()));
+            task.complete(assistant.chat(request.memoryKey(), request.message().text()));
         } catch (InputGuardrailException e) {
-            task.reject("Request blocked by guardrail: " + e.getMessage());
+            task.reject("Request blocked: " + Guardrails.reason(e));
         }
     }
 

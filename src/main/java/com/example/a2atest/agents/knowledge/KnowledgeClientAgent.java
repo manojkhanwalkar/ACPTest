@@ -19,7 +19,12 @@ public final class KnowledgeClientAgent extends RemoteAgent {
     }
 
     public Answer ask(String question) {
-        A2a.Task task = send(question);
+        return ask(question, contextId);
+    }
+
+    /** Asks in the conversation {@code contextId}. */
+    public Answer ask(String question, String contextId) {
+        A2a.Task task = send(question, contextId);
         if (task.status().state() != A2a.TaskState.COMPLETED) {
             throw new IllegalStateException("Task " + task.id() + " ended " + task.status().state().wire());
         }

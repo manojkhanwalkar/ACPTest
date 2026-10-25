@@ -82,8 +82,8 @@ public final class OrderAgent implements A2aAgent {
 
     @Override
     public void execute(RequestContext request, TaskUpdater task) {
-        memory.touch(request.contextId());
-        Result<String> result = assistant.chat(request.contextId(), request.message().text());
+        memory.touch(request.memoryKey());
+        Result<String> result = assistant.chat(request.memoryKey(), request.message().text());
         Optional<ToolExecution> question = result.toolExecutions().stream()
                 .filter(t -> OrderTools.ASK_FOR_INPUT.equals(t.request().name()))
                 .findFirst();

@@ -16,8 +16,14 @@ import java.util.function.Consumer;
  * Minimal A2A client over {@link HttpClient}: agent card discovery, {@code message/send} (blocking or not),
  * {@code message/stream}, {@code tasks/get} and {@code tasks/cancel}. With an API key it sends
  * {@value A2a#API_KEY_HEADER} on every call.
+ * <p>
+ * The remote agent is not trusted: the client only posts to a card {@code url} on the same origin (scheme,
+ * host and port) it fetched the card from, so a card can't redirect the API key or requests elsewhere, and it
+ * reads at most {@value #MAX_RESPONSE_BYTES} bytes per response or stream.
  */
 public final class A2aClient {
+
+    static final int MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 
     private final URI baseUri;
     private final String apiKey;
@@ -78,7 +84,8 @@ public final class A2aClient {
                     return;
                 }
                 String line;
-                while ((line = reader.readLine()) != null) {
+                int[] budget = {MAX_RESPONSE_BYTES};
+                while ((line = readLine(reader, budget)) != null) {
                     if (line.startsWith("data:")) {
                         A2a.JsonRpcResponse event = A2a.JSON.readValue(line.substring(5).trim(), A2a.JsonRpcResponse.class);
                         onEvent.accept(result(event, A2a.StreamEvent.class));
@@ -91,6 +98,24 @@ public final class A2aClient {
             Thread.currentThread().interrupt();
             throw new A2aException("Interrupted while streaming from " + baseUri, e);
         }
+    }
+
+    /** Reads one line, failing once the stream as a whole exceeds the remaining {@code budget} characters. */
+    private static String readLine(BufferedReader reader, int[] budget) throws IOException {
+        StringBuilder line = new StringBuilder();
+        int c;
+        while ((c = reader.read()) != -1) {
+            if (--budget[0] < 0) {
+                throw new A2aException("Stream larger than " + MAX_RESPONSE_BYTES + " characters");
+            }
+            if (c == '\n') {
+                return line.toString();
+            }
+            if (c != '\r') {
+                line.append((char) c);
+            }
+        }
+        return line.isEmpty() ? null : line.toString();
     }
 
     private <T> T call(A2a.AgentCard card, String method, Object params, Class<T> resultType) {
@@ -112,7 +137,7 @@ public final class A2aClient {
     }
 
     private HttpRequest.Builder post(A2a.AgentCard card, byte[] body) {
-        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(card.url()))
+        HttpRequest.Builder builder = HttpRequest.newBuilder(endpoint(card))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body));
         if (apiKey != null) {
@@ -121,14 +146,42 @@ public final class A2aClient {
         return builder;
     }
 
+    /** The card's JSON-RPC url, if it is on the same origin as {@code baseUri}. */
+    private URI endpoint(A2a.AgentCard card) {
+        URI url;
+        try {
+            url = URI.create(card.url());
+        } catch (IllegalArgumentException | NullPointerException e) {
+            throw new A2aException("Agent card has an invalid url: " + card.url());
+        }
+        boolean sameOrigin = baseUri.getScheme().equalsIgnoreCase(String.valueOf(url.getScheme()))
+                && baseUri.getHost().equalsIgnoreCase(String.valueOf(url.getHost()))
+                && port(baseUri) == port(url);
+        if (!sameOrigin) {
+            throw new A2aException("Agent card url " + card.url() + " is not on " + baseUri + "; refusing to call it");
+        }
+        return url;
+    }
+
+    private static int port(URI uri) {
+        return uri.getPort() != -1 ? uri.getPort() : "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80;
+    }
+
     private <T> T send(HttpRequest.Builder builder, Class<T> type) {
         try {
-            HttpResponse<byte[]> response = http.send(builder.timeout(Duration.ofMinutes(3)).build(),
-                    HttpResponse.BodyHandlers.ofByteArray());
+            HttpResponse<InputStream> response = http.send(builder.timeout(Duration.ofMinutes(3)).build(),
+                    HttpResponse.BodyHandlers.ofInputStream());
+            byte[] body;
+            try (InputStream in = response.body()) {
+                body = in.readNBytes(MAX_RESPONSE_BYTES + 1);
+            }
+            if (body.length > MAX_RESPONSE_BYTES) {
+                throw new A2aException("Response from " + baseUri + " larger than " + MAX_RESPONSE_BYTES + " bytes");
+            }
             if (response.statusCode() / 100 != 2) {
                 throw new A2aException("HTTP " + response.statusCode() + " from " + baseUri);
             }
-            return A2a.JSON.readValue(response.body(), type);
+            return A2a.JSON.readValue(body, type);
         } catch (IOException e) {
             throw new A2aException("A2A request to " + baseUri + " failed", e);
         } catch (InterruptedException e) {
