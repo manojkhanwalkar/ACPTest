@@ -47,6 +47,15 @@
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j</artifactId>
         </dependency>
+        <!-- Optional real LLMs for the A2A agents, selected at runtime with A2A_LLM=ollama|anthropic -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-ollama</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-anthropic</artifactId>
+        </dependency>
 
         <!-- JSON for the ACP wire format -->
         <dependency>
