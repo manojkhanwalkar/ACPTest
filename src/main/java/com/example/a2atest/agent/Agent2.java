@@ -2,10 +2,11 @@ package com.example.a2atest.agent;
 
 import com.example.a2atest.a2a.A2a;
 import com.example.a2atest.a2a.A2aAgent;
-import dev.langchain4j.memory.chat.MessageWindowChatMemory;
+import com.example.a2atest.memory.ConversationMemory;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.service.AiServices;
 
+import java.time.Duration;
 import java.util.List;
 
 /**
@@ -17,6 +18,8 @@ public final class Agent2 implements A2aAgent {
     public static final String NAME = "agent2";
 
     private final Assistant assistant;
+    // bounded: at most 1000 conversations of 20 messages, dropped after 30 idle minutes
+    private final ConversationMemory memory = ConversationMemory.inMemory(20, 1000, Duration.ofMinutes(30));
 
     /** Agent2 without an LLM: replies with a fixed acknowledgement of the request. */
     public Agent2() {
@@ -26,8 +29,9 @@ public final class Agent2 implements A2aAgent {
     public Agent2(ChatModel model) {
         this.assistant = AiServices.builder(Assistant.class)
                 .chatModel(model)
-                .chatMemoryProvider(contextId -> MessageWindowChatMemory.withMaxMessages(20))
+                .chatMemoryProvider(memory)
                 .build();
+        memory.bind(assistant);
     }
 
     @Override
@@ -41,6 +45,7 @@ public final class Agent2 implements A2aAgent {
 
     @Override
     public String reply(A2a.Message message, String contextId) {
+        memory.touch(contextId);
         return assistant.chat(contextId, message.text());
     }
 }

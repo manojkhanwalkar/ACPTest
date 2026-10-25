@@ -72,7 +72,7 @@ class A2aAgentExchangeTest {
 
     @Test
     void unknownMethodIsJsonRpcMethodNotFound() throws Exception {
-        String response = post("{\"jsonrpc\": \"2.0\", \"id\": 7, \"method\": \"tasks/cancel\", \"params\": {}}");
+        String response = post("{\"jsonrpc\": \"2.0\", \"id\": 7, \"method\": \"tasks/resubscribe\", \"params\": {}}");
         assertTrue(response.contains("\"code\":-32601"), response);
     }
 
