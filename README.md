@@ -14,10 +14,10 @@ Agent1 ──GET /agents/agent2──▶  AcpServer (hosts Agent2)
 | Class | Role |
 |---|---|
 | `acp/Acp` | ACP data model (Message, MessagePart, Run, RunCreateRequest, AgentManifest, Error), snake_case JSON |
-| `acp/AcpServer` | ACP REST server on the JDK HTTP server: `GET /ping`, `GET /agents`, `GET /agents/{name}`, `POST /runs` (sync mode) |
+| `acp/AcpServer` | ACP REST server on the JDK HTTP server: `GET /ping`, `GET /agents`, `GET /agents/{name}`, `POST /runs` (sync mode). Bodies over 1 MiB get HTTP 413, more than 64 runs at once get HTTP 429, `session_id` must be 1-128 characters of `[A-Za-z0-9._:-]`, and errors carry a reference id instead of exception details |
 | `acp/AcpClient` | ACP client: agent discovery and synchronous runs |
 | `agent/Agent1` | Requesting agent: composes a request with its assistant and sends it to Agent2 as an ACP run |
-| `agent/Agent2` | Responding agent: hosted on the ACP server, answers each run with its assistant |
+| `agent/Agent2` | Responding agent: hosted on the ACP server, answers each run with its assistant (chat memory for at most 1,000 sessions, least recently used dropped first) |
 | `agent/Assistant` | LangChain4j AI service interface used by both agents (chat memory per ACP session) |
 | `agent/PlaceholderChatModel` | A `ChatModel` with a fixed rule, standing in for the LLM |
 

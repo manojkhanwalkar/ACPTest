@@ -1,6 +1,7 @@
 package com.example.acptest.acp;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -10,6 +11,9 @@ import java.util.List;
 
 /** Minimal ACP client over {@link HttpClient}: agent discovery and synchronous runs. */
 public final class AcpClient {
+
+    /** Largest response body read from a server; a hostile server can't make the client buffer more. */
+    static final int MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 
     private final URI baseUri;
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
@@ -41,13 +45,20 @@ public final class AcpClient {
 
     private <T> T send(HttpRequest.Builder builder, Class<T> type) {
         try {
-            HttpResponse<byte[]> response = http.send(builder.timeout(Duration.ofSeconds(30)).build(),
-                    HttpResponse.BodyHandlers.ofByteArray());
+            HttpResponse<InputStream> response = http.send(builder.timeout(Duration.ofSeconds(30)).build(),
+                    HttpResponse.BodyHandlers.ofInputStream());
+            byte[] body;
+            try (InputStream in = response.body()) {
+                body = in.readNBytes(MAX_RESPONSE_BYTES + 1);
+            }
+            if (body.length > MAX_RESPONSE_BYTES) {
+                throw new AcpException("ACP response from " + baseUri + " is larger than " + MAX_RESPONSE_BYTES + " bytes");
+            }
             if (response.statusCode() / 100 != 2) {
-                Acp.Error error = Acp.JSON.readValue(response.body(), Acp.Error.class);
+                Acp.Error error = Acp.JSON.readValue(body, Acp.Error.class);
                 throw new AcpException("ACP " + response.statusCode() + " " + error.code() + ": " + error.message());
             }
-            return Acp.JSON.readValue(response.body(), type);
+            return Acp.JSON.readValue(body, type);
         } catch (IOException e) {
             throw new AcpException("ACP request to " + baseUri + " failed", e);
         } catch (InterruptedException e) {
