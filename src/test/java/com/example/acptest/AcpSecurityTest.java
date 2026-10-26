@@ -1,16 +1,23 @@
 package com.example.acptest;
 
+import com.example.a2atest.memory.ConversationMemory;
 import com.example.acptest.acp.Acp;
 import com.example.acptest.acp.AcpAgent;
 import com.example.acptest.acp.AcpServer;
 import com.example.acptest.agent.Agent2;
+import com.example.acptest.agent.PlaceholderChatModel;
+import dev.langchain4j.store.memory.chat.InMemoryChatMemoryStore;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -84,11 +91,62 @@ class AcpSecurityTest {
     }
 
     @Test
-    void agent2ChatMemoryIsBounded() {
-        Agent2 agent2 = new Agent2();
-        for (int i = 0; i < Agent2.MAX_SESSIONS + 10; i++) {
+    void largeUploadGetsTheRefusalNotAReset() throws Exception {
+        try (AcpServer server = new AcpServer(0, new Agent2())) {
+            HttpResponse<String> response = post(server.baseUri(), run(null, "x".repeat(20 * 1024 * 1024)));
+            assertEquals(413, response.statusCode());
+        }
+    }
+
+    private static final String SLOW = "slow";
+
+    private static ConversationMemory memory(InMemoryChatMemoryStore store, int max) {
+        return new ConversationMemory(20, max, Duration.ofMinutes(30), store, false, Clock.systemUTC());
+    }
+
+    @Test
+    void agent2EvictsTheChatMemoryItself() {
+        InMemoryChatMemoryStore store = new InMemoryChatMemoryStore();
+        Agent2 agent2 = new Agent2(new PlaceholderChatModel(r -> "ok"), memory(store, 3));
+        for (int i = 0; i < 5; i++) {
             agent2.run(List.of(Acp.Message.user("hi")), "session-" + i);
         }
-        assertEquals(Agent2.MAX_SESSIONS, agent2.activeSessions());
+        assertEquals(3, agent2.activeSessions());
+        assertTrue(store.getMessages("session-0").isEmpty(), "evicted conversation still stored");
+        assertFalse(store.getMessages("session-4").isEmpty());
+    }
+
+    @Test
+    void sessionInFlightIsNotEvictedOrOrphaned() throws Exception {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        InMemoryChatMemoryStore store = new InMemoryChatMemoryStore();
+        Agent2 agent2 = new Agent2(new PlaceholderChatModel(request -> {
+            if (request.equals(SLOW)) {
+                started.countDown();
+                try {
+                    release.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return "ok";
+        }), memory(store, 3));
+
+        Thread slow = Thread.ofVirtual().start(() -> agent2.run(List.of(Acp.Message.user(SLOW)), "slow-session"));
+        assertTrue(started.await(10, TimeUnit.SECONDS));
+        for (int i = 0; i < 5; i++) {
+            agent2.run(List.of(Acp.Message.user("hi")), "session-" + i);
+        }
+        release.countDown();
+        slow.join();
+
+        // the slow session kept its place and its memory, and the limit still holds
+        assertEquals(3, agent2.activeSessions());
+        assertFalse(store.getMessages("slow-session").isEmpty());
+        agent2.run(List.of(Acp.Message.user("hi")), "session-9");
+        agent2.run(List.of(Acp.Message.user("hi")), "session-10");
+        agent2.run(List.of(Acp.Message.user("hi")), "session-11");
+        assertTrue(store.getMessages("slow-session").isEmpty(), "slow session never evicted after its call");
     }
 }

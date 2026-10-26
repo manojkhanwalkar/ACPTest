@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -39,6 +40,8 @@ public final class AcpServer implements AutoCloseable {
     public static final int MAX_REQUEST_BYTES = 1024 * 1024;
     /** Runs executing at once; further runs are refused with HTTP 429, which bounds LLM cost and threads. */
     public static final int MAX_CONCURRENT_RUNS = 64;
+    /** Refused bodies are read and discarded up to this size before replying; beyond it the connection is cut. */
+    static final long MAX_DRAIN_BYTES = 64L * 1024 * 1024;
     private static final Pattern VALID_SESSION_ID = Pattern.compile("[A-Za-z0-9._:-]{1,128}");
 
     private final Map<String, AcpAgent> agents = new LinkedHashMap<>();
@@ -80,10 +83,30 @@ public final class AcpServer implements AutoCloseable {
 
     private void createRun(HttpExchange ex) throws IOException {
         Instant createdAt = Instant.now();
+        // refuse what we can before reading (and buffering) the body
+        String declared = ex.getRequestHeaders().getFirst("Content-Length");
+        if (declared != null && parseLength(declared) > MAX_REQUEST_BYTES) {
+            refuseTooLarge(ex);
+            return;
+        }
+        if (!running.tryAcquire()) {
+            drain(ex.getRequestBody());
+            // ACP only defines server_error, invalid_input and not_found; the 429 status marks it as retryable
+            sendJson(ex, 429, new Acp.Error("server_error", "Too many runs in progress; retry later"));
+            return;
+        }
+        try {
+            createRun(ex, createdAt);
+        } finally {
+            running.release();
+        }
+    }
+
+    private void createRun(HttpExchange ex, Instant createdAt) throws IOException {
         Acp.RunCreateRequest request;
         byte[] body = ex.getRequestBody().readNBytes(MAX_REQUEST_BYTES + 1);
         if (body.length > MAX_REQUEST_BYTES) {
-            sendJson(ex, 413, new Acp.Error("invalid_input", "Request larger than " + MAX_REQUEST_BYTES + " bytes"));
+            refuseTooLarge(ex);
             return;
         }
         try {
@@ -115,10 +138,6 @@ public final class AcpServer implements AutoCloseable {
                     "session_id must be 1-128 characters of [A-Za-z0-9._:-]"));
             return;
         }
-        if (!running.tryAcquire()) {
-            sendJson(ex, 429, new Acp.Error("server_error", "Too many runs in progress; retry later"));
-            return;
-        }
 
         String sessionId = request.sessionId() != null ? request.sessionId() : UUID.randomUUID().toString();
         Acp.Run run;
@@ -131,10 +150,33 @@ public final class AcpServer implements AutoCloseable {
             log.warn("Agent {} failed on session {}, reference {}", agent.manifest().name(), sessionId, reference, e);
             run = Acp.Run.failed(agent.manifest().name(), sessionId,
                     new Acp.Error("server_error", "Internal error (reference " + reference + ")"), createdAt);
-        } finally {
-            running.release();
         }
         sendJson(ex, 200, run);
+    }
+
+    /**
+     * Sends 413. The rest of the body is read and discarded first (up to {@link #MAX_DRAIN_BYTES}), so a client
+     * still uploading gets the response rather than a connection reset.
+     */
+    private static void refuseTooLarge(HttpExchange ex) throws IOException {
+        drain(ex.getRequestBody());
+        sendJson(ex, 413, new Acp.Error("invalid_input", "Request larger than " + MAX_REQUEST_BYTES + " bytes"));
+    }
+
+    private static void drain(InputStream in) throws IOException {
+        long left = MAX_DRAIN_BYTES;
+        long skipped;
+        while (left > 0 && (skipped = in.skip(left)) > 0) {
+            left -= skipped;
+        }
+    }
+
+    private static long parseLength(String header) {
+        try {
+            return Long.parseLong(header.trim());
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     private interface Handler {
