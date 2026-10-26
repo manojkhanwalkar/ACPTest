@@ -12,11 +12,11 @@ import org.slf4j.LoggerFactory;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * Chat memory per A2A {@code contextId} with limits, so a long-running agent doesn't keep every conversation
@@ -28,8 +28,8 @@ import java.util.Map;
  * the default in-memory store its messages are deleted too; with a persistent store such as
  * {@link FileChatMemoryStore} they stay on disk and the conversation resumes when the context is used again.
  * <p>
- * Agents call {@link #touch} with the context id before each call to their AI service, and {@link #bind} once
- * with the AI service after building it.
+ * Agents wrap each call to their AI service in {@link #use} (or call {@link #touch} before it), and call
+ * {@link #bind} once with the AI service after building it.
  */
 public final class ConversationMemory implements ChatMemoryProvider {
 
@@ -42,6 +42,8 @@ public final class ConversationMemory implements ChatMemoryProvider {
     private final boolean persistent;
     private final Clock clock;
     private final LinkedHashMap<Object, Instant> lastUsed = new LinkedHashMap<>(16, 0.75f, true);
+    // calls in flight per conversation; these are never evicted
+    private final Map<Object, Integer> inUse = new HashMap<>();
     private ChatMemoryAccess service;
     private long evictions;
 
@@ -82,34 +84,45 @@ public final class ConversationMemory implements ChatMemoryProvider {
     }
 
     /** Marks the conversation as used now and evicts idle and least recently used conversations. */
-    public void touch(Object contextId) {
-        List<Object> evicted = new ArrayList<>();
-        synchronized (this) {
-            Instant now = clock.instant();
-            lastUsed.put(contextId, now);
-            Iterator<Map.Entry<Object, Instant>> it = lastUsed.entrySet().iterator();
-            while (it.hasNext()) {
-                Map.Entry<Object, Instant> entry = it.next();
-                boolean idle = Duration.between(entry.getValue(), now).compareTo(idleTimeout) > 0;
-                if (!entry.getKey().equals(contextId) && (idle || lastUsed.size() > maxConversations)) {
-                    evicted.add(entry.getKey());
-                    it.remove();
-                }
+    public synchronized void touch(Object contextId) {
+        Instant now = clock.instant();
+        lastUsed.put(contextId, now);
+        Iterator<Map.Entry<Object, Instant>> it = lastUsed.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<Object, Instant> entry = it.next();
+            Object id = entry.getKey();
+            boolean idle = Duration.between(entry.getValue(), now).compareTo(idleTimeout) > 0;
+            // a conversation with a call in flight would be re-created by that call, outside the limit
+            if (!id.equals(contextId) && !inUse.containsKey(id) && (idle || lastUsed.size() > maxConversations)) {
+                it.remove();
+                // evicted under the lock, so a concurrent touch can't revive the id between removal and eviction
+                evict(id);
+                evictions++;
             }
-            evictions += evicted.size();
         }
-        for (Object id : evicted) {
-            evict(id);
+    }
+
+    /**
+     * Touches the conversation and runs {@code call} (the AI service call) while keeping the conversation from
+     * being evicted, so a concurrent eviction can't drop or orphan its memory mid-call.
+     */
+    public <T> T use(Object contextId, Supplier<T> call) {
+        synchronized (this) {
+            inUse.merge(contextId, 1, Integer::sum);
+            touch(contextId);
+        }
+        try {
+            return call.get();
+        } finally {
+            synchronized (this) {
+                inUse.computeIfPresent(contextId, (id, count) -> count == 1 ? null : count - 1);
+            }
         }
     }
 
     private void evict(Object contextId) {
-        ChatMemoryAccess target;
-        synchronized (this) {
-            target = service;
-        }
-        if (target != null) {
-            target.evictChatMemory(contextId);
+        if (service != null) {
+            service.evictChatMemory(contextId);
         }
         if (!persistent) {
             store.deleteMessages(contextId);
